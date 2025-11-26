@@ -82,10 +82,20 @@ router.post("/publish", async (req, res) => {
         .json({ error: "Missing player or score" });
     }
 
+    // Ensure schemaId is computed before publishing
+    if (!schemaId) {
+      schemaId = await sdk.streams.computeSchemaId(playerSchema);
+    }
+
     const data = encoder.encodeData([
       { name: "player", value: player, type: "address" },
       { name: "score", value: BigInt(score), type: "uint256" },
     ]);
+
+    // Validate that data was encoded successfully
+    if (!data) {
+      throw new Error("Failed to encode data");
+    }
 
     const dataStreams = [
       { id: toHex(`player-${Date.now()}`, { size: 32 }), schemaId, data },

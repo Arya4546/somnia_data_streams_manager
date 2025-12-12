@@ -20,7 +20,7 @@ const walletClient = createWalletClient({
 
 const sdk = new SDK({ public: publicClient, wallet: walletClient });
 
-const playerSchema = `address player, uint256 score`;
+const playerSchema = `address player, uint256 score, uint256 playTime`;
 const encoder = new SchemaEncoder(playerSchema);
 
 let schemaId;
@@ -83,6 +83,26 @@ async function ensureSchemaId() {
 // Start initialization immediately
 ensureSchemaId().catch(console.error);
 
+router.get("/health", async (req, res) => {
+  try {
+    const address = walletClient.account.address;
+    const balance = await publicClient.getBalance({ address });
+    const id = await ensureSchemaId();
+    
+    res.json({ 
+      status: "ok",
+      wallet: address,
+      balance: balance.toString(),
+      balanceSTT: (Number(balance) / 1e18).toFixed(4),
+      schemaId: id,
+      network: dreamChain.name,
+      rpc: dreamChain.rpcUrls.default.http[0]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get("/schema", async (req, res) => {
   try {
     const id = await ensureSchemaId();
@@ -94,23 +114,34 @@ router.get("/schema", async (req, res) => {
 
 router.post("/publish", async (req, res) => {
   try {
-    const { player, score } = req.body;
+    const { player, score, playTime } = req.body;
 
-    if (!player || score == null) {
+    if (!player || score == null || playTime == null) {
       return res
         .status(400)
-        .json({ error: "Missing player or score" });
+        .json({ error: "Missing player, score, or playTime" });
     }
 
-    // Ensure schemaId is computed before publishing
     const currentSchemaId = await ensureSchemaId();
+
+    const balance = await publicClient.getBalance({ 
+      address: walletClient.account.address 
+    });
+
+    if (balance === 0n) {
+      return res.status(500).json({ 
+        error: "Insufficient funds: Publisher wallet has zero STT balance",
+        wallet: walletClient.account.address,
+        message: "Please fund this wallet with STT tokens on Somnia Dream network"
+      });
+    }
 
     const data = encoder.encodeData([
       { name: "player", value: player, type: "address" },
       { name: "score", value: BigInt(score), type: "uint256" },
+      { name: "playTime", value: BigInt(playTime), type: "uint256" },
     ]);
 
-    // Validate that data was encoded successfully
     if (!data) {
       throw new Error("Failed to encode data");
     }
@@ -122,13 +153,26 @@ router.post("/publish", async (req, res) => {
     const tx = await sdk.streams.set(dataStreams);
 
     console.log(
-      `Published: ${player} | Score ${score} | Tx ${tx}`
+      `Published: ${player} | Score ${score} | PlayTime ${playTime}s | Tx ${tx}`
     );
 
     res.json({ success: true, txHash: tx });
   } catch (err) {
     console.error("Publish error:", err);
-    res.status(500).json({ error: err.message });
+    
+    if (err.message?.includes("account does not exist") || err.details?.includes("account does not exist")) {
+      return res.status(500).json({ 
+        error: "Publisher wallet account does not exist or has zero balance",
+        wallet: walletClient.account.address,
+        message: "Please fund this wallet with STT tokens on Somnia Dream network",
+        details: err.shortMessage || err.message
+      });
+    }
+    
+    res.status(500).json({ 
+      error: err.shortMessage || err.message,
+      details: err.details
+    });
   }
 });
 
@@ -151,13 +195,15 @@ router.get("/data", async (req, res) => {
 
     const formatted = allData.map((item) => {
       let player = "",
-        score = "";
+        score = "",
+        playTime = "";
       for (const field of item) {
         const val = field.value?.value ?? field.value;
         if (field.name === "player") player = val;
         if (field.name === "score") score = Number(val);
+        if (field.name === "playTime") playTime = Number(val);
       }
-      return { player, score };
+      return { player, score, playTime };
     });
 
     const bestScores = {};
@@ -175,6 +221,7 @@ router.get("/data", async (req, res) => {
         rank: index + 1,
         player: e.player,
         score: e.score.toString(),
+        playTime: e.playTime.toString(),
       }));
 
     res.json({
